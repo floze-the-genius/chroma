@@ -43,7 +43,7 @@ pub struct FunctionExecutionContext {
 }
 
 fn has_reached_queue_frontier(completion_offset: i64, queue_compaction_offset: i64) -> bool {
-    queue_compaction_offset > 0 && completion_offset >= queue_compaction_offset
+    completion_offset >= queue_compaction_offset
 }
 
 impl FunctionExecutionContext {
@@ -62,12 +62,12 @@ impl FunctionExecutionContext {
         attached_function_id: AttachedFunctionUuid,
     ) -> Result<LogFetchOrchestratorResponse, CompactionError> {
         Ok(log_fetch_context
-            .run_get_logs_for_attached_function(
+            .run_get_logs(
                 collection_id,
                 database_name.clone(),
                 system.clone(),
                 use_compacted_logs,
-                attached_function_id,
+                Some(attached_function_id),
             )
             .await?)
     }
@@ -248,8 +248,8 @@ mod tests {
     use super::has_reached_queue_frontier;
 
     #[test]
-    fn zero_queue_frontier_is_not_treated_as_completed_work() {
-        assert!(!has_reached_queue_frontier(0, 0));
+    fn zero_queue_frontier_treats_equality_as_complete() {
+        assert!(has_reached_queue_frontier(0, 0));
     }
 
     #[test]

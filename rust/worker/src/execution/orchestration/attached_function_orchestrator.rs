@@ -248,6 +248,10 @@ pub enum AttachedFunctionOrchestratorResponse {
 }
 
 impl AttachedFunctionOrchestrator {
+    fn queued_compaction_offset(collection_info: &CollectionCompactInfo) -> i64 {
+        collection_info.pulled_log_offset
+    }
+
     fn collect_resolved_attached_functions(
         input_collection_data: &[FunctionInputCollectionData],
     ) -> Vec<AttachedFunction> {
@@ -648,13 +652,14 @@ impl Orchestrator for AttachedFunctionOrchestrator {
             }
 
             let attached_function = self.resolved_attached_functions[0].clone();
-            if self
-                .set_function_context(self.make_function_context(&attached_function))
-                .is_err()
+            if let Err(function_context) =
+                self.set_function_context(self.make_function_context(&attached_function))
             {
                 self.terminate_with_result(
                     Err(AttachedFunctionOrchestratorError::InvariantViolation(
-                        "Failed to set function context for attached function".to_string(),
+                        format!(
+                            "Failed to set function context for attached function: {function_context:?}"
+                        ),
                     )),
                     ctx,
                 )
@@ -829,13 +834,13 @@ impl Handler<TaskResult<GetAttachedFunctionOutput, GetAttachedFunctionOperatorEr
             if !self.output_context.is_fn_consumer {
                 if let Some(work_queue_client) = &self.output_context.work_queue_client {
                     let operator = Box::new(QueueFunctionOperator::new(work_queue_client.clone()));
-                    let compaction_offset =
-                        self.get_input_collection_info().collection.log_position;
+                    let queued_compaction_offset =
+                        Self::queued_compaction_offset(self.get_input_collection_info());
                     let input = QueueFunctionInput::new(
                         async_attached_function.id,
                         self.get_input_collection_info().collection_id,
                         async_attached_function.completion_offset as i64,
-                        compaction_offset,
+                        queued_compaction_offset,
                     );
                     let task = wrap(
                         operator,
@@ -843,7 +848,7 @@ impl Handler<TaskResult<GetAttachedFunctionOutput, GetAttachedFunctionOperatorEr
                         ctx.receiver(),
                         self.context().task_cancellation_token.clone(),
                     );
-                    let res = self.dispatcher().send(task, None).await;
+                    let res = self.dispatcher().send(task, Some(Span::current())).await;
                     if self.ok_or_terminate(res, ctx).await.is_none() {
                         return;
                     }
@@ -1180,5 +1185,47 @@ impl Handler<TaskResult<QueueFunctionOutput, QueueFunctionError>> for AttachedFu
         // For async-only functions, we don't have any output records to apply.
         // The function will be processed asynchronously by an external consumer.
         self.finish_no_attached_function(ctx).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AttachedFunctionOrchestrator;
+    use crate::execution::orchestration::compact::CollectionCompactInfo;
+    use chroma_types::{Collection, CollectionUuid};
+
+    fn compact_info(pulled_log_offset: i64, persisted_log_position: i64) -> CollectionCompactInfo {
+        CollectionCompactInfo {
+            collection_id: CollectionUuid::new(),
+            collection: Collection {
+                log_position: persisted_log_position,
+                ..Default::default()
+            },
+            writers: None,
+            pulled_log_offset,
+            hnsw_index_uuid: None,
+            schema: None,
+            original_segment_flush_infos: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn async_queue_frontier_uses_pulled_log_offset() {
+        let collection_info = compact_info(550, 250);
+
+        assert_eq!(
+            AttachedFunctionOrchestrator::queued_compaction_offset(&collection_info),
+            550
+        );
+    }
+
+    #[test]
+    fn async_queue_frontier_uses_pulled_log_offset_even_when_it_regresses() {
+        let collection_info = compact_info(200, 250);
+
+        assert_eq!(
+            AttachedFunctionOrchestrator::queued_compaction_offset(&collection_info),
+            200
+        );
     }
 }
